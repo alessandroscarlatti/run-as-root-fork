@@ -30,6 +30,7 @@ public class SocketTransaction<I extends Serializable, O extends Serializable> i
 
     private boolean started;
     private boolean completed;
+    private boolean timedOut;
 
     private CountDownLatch doneLatch;
 
@@ -50,6 +51,15 @@ public class SocketTransaction<I extends Serializable, O extends Serializable> i
 
     public SocketTransaction(I request) {
         this.request = request;
+
+        initDefaults();
+        initServer();
+    }
+
+
+    public SocketTransaction(I request, int timeoutMs) {
+        this.request = request;
+        this.timeoutMs = timeoutMs;
 
         initDefaults();
         initServer();
@@ -104,9 +114,13 @@ public class SocketTransaction<I extends Serializable, O extends Serializable> i
     public O exchange() throws TransactionTimeoutException {
 
         if (!completed) {
-            O response = doExchange();
-            completed = true;
-            return response;
+            try {
+                O response = doExchange();
+                return response;
+            } finally {
+                completed = true;
+            }
+
         }
 
         throw new IllegalStateException("This Socket Transaction has already been initiated.");
@@ -114,7 +128,12 @@ public class SocketTransaction<I extends Serializable, O extends Serializable> i
 
     private O doExchange() throws TransactionTimeoutException {
         try {
+            timer();
             doneLatch.await();
+
+            if (timedOut) {
+                throw new TransactionTimeoutException("Transaction timed out at " + timeoutMs + "ms");
+            }
 
             // now we interpret the server results.
             if (server.getServerErr() != null) {
@@ -134,6 +153,25 @@ public class SocketTransaction<I extends Serializable, O extends Serializable> i
         } catch (InterruptedException e) {
             throw new RuntimeException("Unexpected interruption while waiting for transaction to complete.", e);
         }
+    }
+
+    private void timer() {
+        if (timeoutMs <= 0) return;
+
+        new Thread(() -> {
+            try {
+                Thread.sleep(timeoutMs);
+
+                if (!completed) {
+                    System.out.println("Transaction has timed out at " + timeoutMs + " ms");
+                    timedOut = true;
+                    doneLatch.countDown();
+                }
+
+            } catch (InterruptedException e) {
+                throw new RuntimeException("Unexpected interruption while waiting for transaction to timeout.", e);
+            }
+        }).start();
     }
 
     @Override

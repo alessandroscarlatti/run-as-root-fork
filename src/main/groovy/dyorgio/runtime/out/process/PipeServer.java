@@ -23,6 +23,9 @@ public class PipeServer implements AutoCloseable {
 
     private Runnable onDone;
 
+    private ObjectInputStream objIn;
+    private ObjectOutputStream objOut;
+
     public PipeServer(final Serializable request, Runnable onDone) {
         this.request = request;
         initServer();
@@ -49,9 +52,6 @@ public class PipeServer implements AutoCloseable {
 
     private Thread listener() {
         return new Thread() {
-
-            private ObjectInputStream objIn;
-            private ObjectOutputStream objOut;
 
             @Override
             public void run() {
@@ -129,18 +129,24 @@ public class PipeServer implements AutoCloseable {
     @Override
     public void close() {
 
-        System.out.println("closing thread");
+        System.out.println("closing server");
 
         try {
             listener.interrupt();
             server.close();
+            objIn.close();
+            objOut.close();
         } catch (Exception e) {
+            e.printStackTrace();
         }
 
         try {
             listener.join();
         } catch (Exception e) {
+            e.printStackTrace();
         }
+
+        System.out.println("Server closed");
     }
 
     protected int getPort() {

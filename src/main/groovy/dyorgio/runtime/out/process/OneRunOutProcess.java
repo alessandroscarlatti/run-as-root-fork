@@ -156,7 +156,7 @@ public class OneRunOutProcess implements Serializable {
 
     private <T extends Serializable> OutProcessResult<T> getResult(CallableSerializable<T> callable, String[] javaOptions, String classpath, ProcessBuilderFactory processBuilderFactory) throws Exception{
 
-        try (SocketTransaction<CallableSerializable<T>, Serializable> tx = new SocketTransaction<>(callable)) {
+        try (SocketTransaction<CallableSerializable<T>, Serializable> tx = new SocketTransaction<>(callable, 5000)) {
 
             // create out process command
             List<String> commandList = new ArrayList<>();
