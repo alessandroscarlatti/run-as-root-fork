@@ -143,7 +143,7 @@ public class OneRunOutProcess implements Serializable {
      * @see OutProcessResult
      * @serialData
      */
-    public <T extends Serializable> OutProcessResult<T> call(Callable<T> callable) throws Exception, ExecutionException {
+    public <T extends Serializable> OutProcessResult<T> call(CallableSerializable<T> callable) throws Exception, ExecutionException {
 
         // If is already out process
         if (System.getProperty(RUNNING_AS_OUT_PROCESS) != null) {
@@ -151,27 +151,21 @@ public class OneRunOutProcess implements Serializable {
             return new OutProcessResult(callable.call(), 0);
         }
 
-
-
         return getResult(callable, javaOptions, classpath, processBuilderFactory);
-
-
     }
 
-    private <T extends Serializable> OutProcessResult<T> getResult(Callable<T> callable, String[] javaOptions, String classpath, ProcessBuilderFactory processBuilderFactory) throws Exception{
-        // Create a tmp server
-        PipeServer pipeServer = new PipeServer(callable);
-        int returnCode;
-        try {
+    private <T extends Serializable> OutProcessResult<T> getResult(CallableSerializable<T> callable, String[] javaOptions, String classpath, ProcessBuilderFactory processBuilderFactory) throws Exception{
+
+        try (SocketTransaction<CallableSerializable<T>, Serializable> tx = new SocketTransaction<>(callable)) {
 
             // create out process command
             List<String> commandList = new ArrayList<>();
             commandList.addAll(Arrays.asList(javaOptions));
             commandList.add("-cp");
-            commandList.add(StringUtils.wrap(classpath, '\''));
+            commandList.add(StringUtils.wrap(classpath, '\''));  // powershell likes the classpath to be wrapped with single quotes
             commandList.add(OneRunRemoteMain.class.getName());
-            commandList.add(String.valueOf(pipeServer.server.getLocalPort()));
-            commandList.add(pipeServer.secret);
+            commandList.add(String.valueOf(tx.getPort()));
+            commandList.add(tx.getSecret());
 
             // adjust in processBuilderFactory and starts
             ProcessBuilder builder = processBuilderFactory.create(Collections.emptyList());
@@ -179,125 +173,29 @@ public class OneRunOutProcess implements Serializable {
             String commaSeparatedArgsList = StringUtils.join(commandList, ", ");
             builder.environment().put("COMMA_SEPARATED_ARGS_LIST", commaSeparatedArgsList);
 
+            // TODO probably don't need these...
             builder.redirectOutput(ProcessBuilder.Redirect.INHERIT);
             builder.redirectError(ProcessBuilder.Redirect.INHERIT);
 
             Process process = builder.start();
 
-            returnCode = process.waitFor();
-
+            int returnCode = process.waitFor();
             System.out.println("got return code: " + returnCode);
 
             if (returnCode != 0) {
                 throw new RuntimeException("Unable to start installation process. " +
-                    "User may not have administrative privileges.  Return code was" + returnCode);
+                    "User may not have allowed elevated privileges.  Return code was " + returnCode);
             }
 
             // otherwise, wait for a max of 10 seconds for the installation to complete
-            receiveThrowOrTimeout();
+            Serializable response = tx.exchange();
 
-        } finally {
-//            pipeServer.close();
-        }
+            return new OutProcessResult(response, returnCode);
 
-        Thread.sleep(30000);
-
-        if (pipeServer.error != null) {
-            throw new ExecutionException(pipeServer.error);
-        } else {
-            return new OutProcessResult(pipeServer.result, returnCode);
-        }
-    }
-
-
-    private void receiveThrowOrTimeout() {
-
-    }
-
-    /**
-     * Pipe SocketServer to comunicate with out process.
-     */
-    private static class PipeServer {
-
-        private final ServerSocket server;
-        private final String secret;
-        private final Thread acceptAndRead;
-        private Throwable error;
-        private Serializable result;
-
-        public PipeServer(final Callable command) {
-
-            Random r = new Random(System.currentTimeMillis());
-            ServerSocket tmpServer = null;
-            while (true) {
-                try {
-                    tmpServer = new ServerSocket(1025 + r.nextInt(65535 - 1024));
-                    break;
-                } catch (Exception e) {
-
-                }
-            }
-            this.server = tmpServer;
-            this.secret = r.nextLong() + ":" + r.nextLong() + ":" + r.nextLong() + ":" + r.nextLong();
-
-            acceptAndRead = new Thread() {
-                @Override
-                public void run() {
-                    while (!isInterrupted()) {
-                        try {
-                            Socket s = server.accept();
-                            if (s != null) {
-
-                                ObjectInputStream objStream = new ObjectInputStream(s.getInputStream());
-                                String clientSecret = objStream.readUTF();
-                                if (clientSecret.equals(secret)) {
-
-                                    ObjectOutputStream objOut = new ObjectOutputStream(s.getOutputStream());
-
-                                    writeCallable(objOut, command);
-
-                                    if (objStream.readBoolean()) {
-                                        result = (Serializable) objStream.readObject();
-                                    } else {
-                                        error = (Throwable) objStream.readObject();
-                                    }
-                                } else {
-                                    System.out.println("Closing: secrets do not match.");
-                                    s.close();
-                                }
-                            }
-                        } catch (Exception e) {
-                            System.out.println("Error in pipe server thread: " + e);
-                            e.printStackTrace();
-                        }
-                    }
-
-                    System.out.println("closing from loop");
-                }
-            };
-            acceptAndRead.start();
-            System.out.println("server started.");
-        }
-
-        private void writeCallable(ObjectOutputStream objOut, Callable callable) throws Exception {
-            objOut.writeObject((Callable & Serializable) callable);
-            objOut.flush();
-        }
-
-        public void close() {
-
-            System.out.println("closing thread");
-
-            try {
-                acceptAndRead.interrupt();
-                server.close();
-            } catch (Exception e) {
-            }
-
-            try {
-                acceptAndRead.join();
-            } catch (Exception e) {
-            }
+        } catch (SocketTransaction.TransactionTimeoutException e) {
+            throw new ExecutionException("Callable timed out.", e);
+        } catch (Exception e) {
+            throw new ExecutionException("Error executing callable.", e);
         }
     }
 
